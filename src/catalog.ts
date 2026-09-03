@@ -3,31 +3,13 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 export const APERTURE_ORIGIN = "https://ai.corp.ts.net";
 export const APERTURE_CATALOG_URL = `${APERTURE_ORIGIN}/v1/models`;
 
-export const ROUTES = [
-  {
-    provider: "aperture-responses",
-    name: "Aperture (Responses)",
-    endpoint: "/v1/responses",
-    api: "openai-responses" as const,
-    baseUrl: `${APERTURE_ORIGIN}/v1`,
-  },
-  {
-    provider: "aperture-completions",
-    name: "Aperture (Chat Completions)",
-    endpoint: "/v1/chat/completions",
-    api: "openai-completions" as const,
-    baseUrl: `${APERTURE_ORIGIN}/v1`,
-  },
-  {
-    provider: "aperture-anthropic",
-    name: "Aperture (Anthropic Messages)",
-    endpoint: "/v1/messages",
-    api: "anthropic-messages" as const,
-    baseUrl: APERTURE_ORIGIN,
-  },
+export const PROTOCOLS = [
+  { endpoint: "/v1/responses", api: "openai-responses" as const, baseUrl: `${APERTURE_ORIGIN}/v1` },
+  { endpoint: "/v1/chat/completions", api: "openai-completions" as const, baseUrl: `${APERTURE_ORIGIN}/v1` },
+  { endpoint: "/v1/messages", api: "anthropic-messages" as const, baseUrl: APERTURE_ORIGIN },
 ] as const;
 
-export type Route = (typeof ROUTES)[number];
+export type Protocol = (typeof PROTOCOLS)[number];
 export type ProviderModelConfig = Omit<Model<Api>, "provider">;
 
 export interface ApertureCatalogModel {
@@ -43,7 +25,7 @@ export interface ApertureCatalogModel {
     input_cache_write?: string | number;
   };
   metadata?: {
-    provider?: { id?: string };
+    provider?: { id?: string; name?: string; description?: string };
   };
 }
 
@@ -51,8 +33,15 @@ export interface ApertureCatalogPayload {
   data: ApertureCatalogModel[];
 }
 
+export interface ProjectedProvider {
+  id: string;
+  name: string;
+  description?: string;
+  models: ProviderModelConfig[];
+}
+
 export interface ProjectedCatalog {
-  byProvider: Map<string, ProviderModelConfig[]>;
+  providers: Map<string, ProjectedProvider>;
   sourceCount: number;
   supportedCount: number;
 }
@@ -90,15 +79,19 @@ function builtinCandidates(entry: ApertureCatalogModel, builtins: readonly Model
   return builtins.filter((model) => normalizedId(model.id) === normalized);
 }
 
-function apiPreference(candidate: Model<Api>, route: Route): number {
-  if (candidate.api === route.api) return 0;
-  if (route.api === "openai-responses" && candidate.api === "openai-codex-responses") return 1;
+function apiPreference(candidate: Model<Api>, protocol: Protocol): number {
+  if (candidate.api === protocol.api) return 0;
+  if (protocol.api === "openai-responses" && candidate.api === "openai-codex-responses") return 1;
   return 2;
 }
 
-function selectBuiltin(entry: ApertureCatalogModel, route: Route, builtins: readonly Model<Api>[]): Model<Api> | undefined {
+function selectBuiltin(
+  entry: ApertureCatalogModel,
+  protocol: Protocol,
+  builtins: readonly Model<Api>[],
+): Model<Api> | undefined {
   return builtinCandidates(entry, builtins).sort(
-    (a, b) => apiPreference(a, route) - apiPreference(b, route) || a.provider.localeCompare(b.provider),
+    (a, b) => apiPreference(a, protocol) - apiPreference(b, protocol) || a.provider.localeCompare(b.provider),
   )[0];
 }
 
@@ -112,8 +105,12 @@ function inferImageInput(entry: ApertureCatalogModel): boolean {
   return /(vision|image|gemini|gpt-4o|gpt-5|claude|pixtral|vl(?:[\/_-]|$))/i.test(entry.id);
 }
 
-function projectModel(entry: ApertureCatalogModel, route: Route, builtins: readonly Model<Api>[]): ProviderModelConfig {
-  const builtin = selectBuiltin(entry, route, builtins);
+function projectModel(
+  entry: ApertureCatalogModel,
+  protocol: Protocol,
+  builtins: readonly Model<Api>[],
+): ProviderModelConfig {
+  const builtin = selectBuiltin(entry, protocol, builtins);
   const contextWindow = positiveInteger(entry.context_window_tokens, builtin?.contextWindow ?? 128_000);
   const maxTokens = Math.min(positiveInteger(entry.max_output_tokens, builtin?.maxTokens ?? 16_384), contextWindow);
   const pricing = entry.pricing;
@@ -121,8 +118,8 @@ function projectModel(entry: ApertureCatalogModel, route: Route, builtins: reado
   return {
     id: entry.id,
     name: entry.display_name?.trim() || builtin?.name || entry.id,
-    api: route.api,
-    baseUrl: route.baseUrl,
+    api: protocol.api,
+    baseUrl: protocol.baseUrl,
     reasoning: builtin?.reasoning ?? inferReasoning(entry),
     thinkingLevelMap: builtin?.thinkingLevelMap,
     input: builtin?.input ?? (inferImageInput(entry) ? ["text", "image"] : ["text"]),
@@ -154,19 +151,34 @@ export function parseCatalog(value: unknown): ApertureCatalogPayload {
 }
 
 export function projectCatalog(payload: ApertureCatalogPayload, builtins: readonly Model<Api>[]): ProjectedCatalog {
-  const byProvider = new Map<string, ProviderModelConfig[]>(ROUTES.map((route) => [route.provider, []]));
+  const providers = new Map<string, ProjectedProvider>();
   const assigned = new Set<string>();
 
-  for (const route of ROUTES) {
-    for (const entry of payload.data) {
-      if (assigned.has(entry.id) || !entry.supported_endpoints?.includes(route.endpoint)) continue;
-      byProvider.get(route.provider)!.push(projectModel(entry, route, builtins));
-      assigned.add(entry.id);
+  for (const entry of payload.data) {
+    const backing = entry.metadata?.provider;
+    if (!backing?.id) continue;
+    const protocol = PROTOCOLS.find((candidate) => entry.supported_endpoints?.includes(candidate.endpoint));
+    if (!protocol) continue;
+
+    const identity = `${backing.id}\0${entry.id}`;
+    if (assigned.has(identity)) continue;
+    assigned.add(identity);
+
+    let provider = providers.get(backing.id);
+    if (!provider) {
+      provider = {
+        id: backing.id,
+        name: backing.name?.trim() || backing.id,
+        description: backing.description?.trim() || undefined,
+        models: [],
+      };
+      providers.set(backing.id, provider);
     }
+    provider.models.push(projectModel(entry, protocol, builtins));
   }
 
-  for (const models of byProvider.values()) models.sort((a, b) => a.id.localeCompare(b.id));
-  return { byProvider, sourceCount: payload.data.length, supportedCount: assigned.size };
+  for (const provider of providers.values()) provider.models.sort((a, b) => a.id.localeCompare(b.id));
+  return { providers, sourceCount: payload.data.length, supportedCount: assigned.size };
 }
 
 export async function fetchCatalog(signal?: AbortSignal): Promise<ApertureCatalogPayload> {

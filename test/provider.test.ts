@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelsStoreEntry, RefreshModelsContext } from "@earendil-works/pi-ai";
-import { parseCatalog, projectCatalog, ROUTES, type ProviderModelConfig } from "../src/catalog.js";
+import { parseCatalog, projectCatalog, type ProjectedProvider, type ProviderModelConfig } from "../src/catalog.js";
 import { createApertureProvider } from "../src/index.js";
 
-function model(id: string): ProviderModelConfig {
+function model(id: string, api: ProviderModelConfig["api"] = "openai-responses"): ProviderModelConfig {
   return {
     id,
     name: id,
-    api: "openai-responses",
-    baseUrl: "https://ai.corp.ts.net/v1",
+    api,
+    baseUrl: api === "anthropic-messages" ? "https://ai.corp.ts.net" : "https://ai.corp.ts.net/v1",
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -18,10 +18,11 @@ function model(id: string): ProviderModelConfig {
   };
 }
 
-function refreshContext(options: {
-  allowNetwork: boolean;
-  stored?: ModelsStoreEntry;
-}): RefreshModelsContext {
+function backing(id: string, models: ProviderModelConfig[]): ProjectedProvider {
+  return { id, name: id, models };
+}
+
+function refreshContext(options: { allowNetwork: boolean; stored?: ModelsStoreEntry }): RefreshModelsContext {
   return {
     allowNetwork: options.allowNetwork,
     stored: options.stored,
@@ -33,9 +34,8 @@ function refreshContext(options: {
   };
 }
 
-test("provider refresh fully replaces the catalog and removes stale models", async () => {
-  const route = ROUTES[0];
-  const provider = createApertureProvider(route, [model("removed"), model("retained")], async () => [
+test("provider refresh fully replaces the backing route catalog", async () => {
+  const provider = createApertureProvider(backing("vercel-ent", [model("removed"), model("retained")]), async () => [
     model("retained"),
     model("added"),
   ]);
@@ -45,54 +45,73 @@ test("provider refresh fully replaces the catalog and removes stale models", asy
   assert.deepEqual(provider.getModels().map((entry) => entry.id), ["retained", "added"]);
 });
 
-test("endpoint migration removes a model from the old provider and adds it to the new one", async () => {
-  const catalog = (endpoint: string) =>
-    projectCatalog(parseCatalog({ data: [{ id: "migrating", supported_endpoints: [endpoint] }] }), []);
-  let projected = catalog("/v1/responses");
-  const responses = createApertureProvider(
-    ROUTES[0],
-    projected.byProvider.get(ROUTES[0].provider) ?? [],
-    async () => projected.byProvider.get(ROUTES[0].provider) ?? [],
+test("backing-route migration removes a model from the old route and adds it to the new route", async () => {
+  const catalog = (provider: string) =>
+    projectCatalog(
+      parseCatalog({
+        data: [{ id: "migrating", supported_endpoints: ["/v1/responses"], metadata: { provider: { id: provider } } }],
+      }),
+      [],
+    );
+  let projected = catalog("vercel-ent");
+  const vercel = createApertureProvider(
+    projected.providers.get("vercel-ent")!,
+    async () => projected.providers.get("vercel-ent")?.models ?? [],
   );
-  const anthropic = createApertureProvider(
-    ROUTES[2],
-    projected.byProvider.get(ROUTES[2].provider) ?? [],
-    async () => projected.byProvider.get(ROUTES[2].provider) ?? [],
+  const openrouter = createApertureProvider(
+    backing("openrouter", []),
+    async () => projected.providers.get("openrouter")?.models ?? [],
   );
 
-  assert.deepEqual(responses.getModels().map((entry) => entry.id), ["migrating"]);
-  assert.deepEqual(anthropic.getModels().map((entry) => entry.id), []);
+  projected = catalog("openrouter");
+  await vercel.refreshModels!(refreshContext({ allowNetwork: true }));
+  await openrouter.refreshModels!(refreshContext({ allowNetwork: true }));
 
-  projected = catalog("/v1/messages");
-  await responses.refreshModels!(refreshContext({ allowNetwork: true }));
-  await anthropic.refreshModels!(refreshContext({ allowNetwork: true }));
-
-  assert.deepEqual(responses.getModels().map((entry) => entry.id), []);
-  assert.deepEqual(anthropic.getModels().map((entry) => entry.id), ["migrating"]);
+  assert.deepEqual(vercel.getModels().map((entry) => entry.id), []);
+  assert.deepEqual(openrouter.getModels().map((entry) => entry.id), ["migrating"]);
 });
 
-test("offline refresh restores the persisted catalog without fetching", async () => {
-  const route = ROUTES[0];
+test("one backing provider can dispatch models through different APIs", () => {
+  const provider = createApertureProvider(
+    backing("vercel-ent", [model("responses"), model("messages", "anthropic-messages")]),
+    async () => [],
+  );
+  assert.deepEqual(provider.getModels().map((entry) => entry.api), ["openai-responses", "anthropic-messages"]);
+});
+
+test("offline refresh restores the persisted backing-route catalog without fetching", async () => {
   let fetches = 0;
-  const provider = createApertureProvider(route, [model("startup")], async () => {
+  const provider = createApertureProvider(backing("vercel-ent", [model("startup")]), async () => {
     fetches++;
     return [model("network")];
   });
-  const storedModel = { ...model("stored"), provider: route.provider };
+  const storedModel = { ...model("stored"), provider: "vercel-ent" };
 
   await provider.refreshModels!(
-    refreshContext({
-      allowNetwork: false,
-      stored: { models: [storedModel], checkedAt: Date.now() },
-    }),
+    refreshContext({ allowNetwork: false, stored: { models: [storedModel], checkedAt: Date.now() } }),
   );
 
   assert.equal(fetches, 0);
   assert.deepEqual(provider.getModels().map((entry) => entry.id), ["stored"]);
 });
 
+test("offline refresh ignores a colliding built-in provider cache", async () => {
+  const provider = createApertureProvider(backing("anthropic", [model("aperture-startup", "anthropic-messages")]), async () => []);
+  const directModel = {
+    ...model("direct-anthropic", "anthropic-messages"),
+    provider: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+  };
+
+  await provider.refreshModels!(
+    refreshContext({ allowNetwork: false, stored: { models: [directModel], checkedAt: Date.now() } }),
+  );
+
+  assert.deepEqual(provider.getModels().map((entry) => entry.id), ["aperture-startup"]);
+});
+
 test("ambient authentication uses a non-secret marker and explicit key wins", async () => {
-  const provider = createApertureProvider(ROUTES[0], [model("one")], async () => []);
+  const provider = createApertureProvider(backing("vercel-ent", [model("one")]), async () => []);
   const resolver = provider.auth.apiKey!.resolve;
   const signal = new AbortController().signal;
   const ambient = await resolver({ ctx: { env: async () => undefined, fileExists: async () => false }, signal });

@@ -15,12 +15,13 @@ import * as openAIResponses from "@earendil-works/pi-ai/api/openai-responses";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  APERTURE_ORIGIN,
   fetchCatalog,
   parseCatalog,
   projectCatalog,
-  ROUTES,
   type ApertureCatalogPayload,
   type ProjectedCatalog,
+  type ProjectedProvider,
   type ProviderModelConfig,
 } from "./catalog.js";
 
@@ -62,19 +63,6 @@ function routeModels(provider: string, models: ProviderModelConfig[]): Model<Api
   return models.map((model) => ({ ...model, provider }));
 }
 
-function routeApi(api: Api): ProviderStreams {
-  switch (api) {
-    case "openai-responses":
-      return openAIResponses;
-    case "openai-completions":
-      return openAICompletions;
-    case "anthropic-messages":
-      return anthropicMessages;
-    default:
-      throw new Error(`Unsupported Aperture API: ${api}`);
-  }
-}
-
 async function resolveAuth(ctx: AuthContext) {
   const apiKey = (await ctx.env("APERTURE_API_KEY"))?.trim();
   return {
@@ -87,17 +75,25 @@ async function resolveAuth(ctx: AuthContext) {
 }
 
 export function createApertureProvider(
-  route: (typeof ROUTES)[number],
-  initial: ProviderModelConfig[],
+  backing: ProjectedProvider,
   refresh: (signal: AbortSignal) => Promise<ProviderModelConfig[]>,
 ): Provider {
-  let models = routeModels(route.provider, initial);
-  const streams = routeApi(route.api);
+  let models = routeModels(backing.id, backing.models);
+  const streams: Partial<Record<Api, ProviderStreams>> = {
+    "openai-responses": openAIResponses,
+    "openai-completions": openAICompletions,
+    "anthropic-messages": anthropicMessages,
+  };
+  const streamFor = (api: Api): ProviderStreams => {
+    const implementation = streams[api];
+    if (!implementation) throw new Error(`Unsupported Aperture API: ${api}`);
+    return implementation;
+  };
 
   return {
-    id: route.provider,
-    name: route.name,
-    baseUrl: route.baseUrl,
+    id: backing.id,
+    name: backing.name,
+    baseUrl: APERTURE_ORIGIN,
     auth: {
       apiKey: {
         name: "Tailscale identity",
@@ -112,19 +108,25 @@ export function createApertureProvider(
     getModels: () => models,
     async refreshModels(context: RefreshModelsContext) {
       if (context.stored) {
-        const restored = context.stored.models.filter((model) => model.provider === route.provider);
-        if (!(await context.publish({ update: () => { models = restored; } }))) return;
+        const providerModels = context.stored.models.filter((model) => model.provider === backing.id);
+        const restored = providerModels.filter((model) => model.baseUrl?.startsWith(APERTURE_ORIGIN));
+        // Built-in providers can have used the same store key before this
+        // extension overrode them. Restore only catalogs wholly owned by
+        // Aperture; otherwise retain the freshly fetched startup projection.
+        if (providerModels.length === restored.length) {
+          if (!(await context.publish({ update: () => { models = restored; } }))) return;
+        }
       }
       if (!context.allowNetwork || context.signal.aborted) return;
-      const refreshed = routeModels(route.provider, await refresh(context.signal));
+      const refreshed = routeModels(backing.id, await refresh(context.signal));
       if (context.signal.aborted) return;
       await context.publish({
         persist: { models: refreshed, checkedAt: Date.now() },
         update: () => { models = refreshed; },
       });
     },
-    stream: (model, context, options) => streams.stream(model, context, options),
-    streamSimple: (model, context, options) => streams.streamSimple(model, context, options),
+    stream: (model, context, options) => streamFor(model.api).stream(model, context, options),
+    streamSimple: (model, context, options) => streamFor(model.api).streamSimple(model, context, options),
   };
 }
 
@@ -158,12 +160,11 @@ export default async function apertureModels(pi: ExtensionAPI): Promise<void> {
     current = projectCatalog(cached, builtins);
   }
 
-  for (const route of ROUTES) {
-    const initial = current.byProvider.get(route.provider) ?? [];
+  for (const backing of current.providers.values()) {
     pi.registerProvider(
-      createApertureProvider(route, initial, async (signal) => {
+      createApertureProvider(backing, async (signal) => {
         const refreshed = await fetchProjected(signal);
-        return refreshed.byProvider.get(route.provider) ?? [];
+        return refreshed.providers.get(backing.id)?.models ?? [];
       }),
     );
   }

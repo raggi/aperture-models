@@ -7,16 +7,22 @@ of duplicating its model list in `~/.pi/agent/models.json`.
 
 - Fetches `https://ai.corp.ts.net/v1/models` during extension startup.
 - Falls back to `~/.cache/pi-aperture-models/catalog.json` when Aperture is unavailable.
-- Assigns every model ID exactly once, in protocol preference order:
+- Registers each `metadata.provider.id` as a Pi provider, preserving Aperture's
+  backing-route identity, pricing, retention, quota, and routing semantics.
+- Preserves the same model ID when it is offered by multiple backing routes.
+- Chooses each model's wire protocol independently, in preference order:
   1. OpenAI Responses
   2. OpenAI Chat Completions
   3. Anthropic Messages
-- Registers `aperture-responses`, `aperture-completions`, and
-  `aperture-anthropic`.
 - Reuses Pi built-in metadata when an exact or provider-prefixed model match is
-  available, while catalog limits and prices remain authoritative.
-- Refreshes all three providers from one coalesced catalog request when Pi
+  available, while the route-specific catalog limits and prices remain authoritative.
+- Refreshes all backing providers from one coalesced catalog request when Pi
   refreshes model catalogs.
+
+Backing IDs are preserved exactly. IDs such as `anthropic` and `openrouter`
+therefore intentionally override Pi's built-in providers while this extension
+is enabled: they mean those backing routes through Aperture, not direct public
+API access.
 
 Aperture normally uses Tailscale identity and needs no API key. In that mode the
 extension sends the non-secret marker `Authorization: Tailscale` to satisfy the
@@ -46,15 +52,15 @@ pi install "$(pwd)"
 pi list
 ```
 
-Then replace the old manually enumerated Aperture providers in
-`~/.pi/agent/models.json` (back it up first). The extension itself supplies the
-three provider definitions, so no model entries are needed there.
+Then remove old manually enumerated Aperture providers from
+`~/.pi/agent/models.json` (back it up first). The extension supplies provider
+and model definitions dynamically, so no model entries are needed there.
 
 Suggested defaults in `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "defaultProvider": "aperture-responses",
+  "defaultProvider": "openai-api",
   "defaultModel": "gpt-5.6-sol"
 }
 ```

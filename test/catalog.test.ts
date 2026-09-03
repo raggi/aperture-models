@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { parseCatalog, projectCatalog, ROUTES } from "../src/catalog.js";
+import { parseCatalog, projectCatalog, PROTOCOLS } from "../src/catalog.js";
 
 const builtin: Model<Api> = {
   id: "gpt-test",
@@ -18,12 +18,14 @@ const builtin: Model<Api> = {
   compat: { supportsReasoningEffort: true },
 };
 
+const backing = (id: string, name = id) => ({ provider: { id, name } });
+
 test("parseCatalog rejects malformed and empty catalogs", () => {
   assert.throws(() => parseCatalog({}), /invalid model catalog/);
   assert.throws(() => parseCatalog({ data: [] }), /empty model catalog/);
 });
 
-test("projection deduplicates IDs using endpoint precedence", () => {
+test("projection groups by backing route and selects protocol per model", () => {
   const projected = projectCatalog(
     parseCatalog({
       data: [
@@ -34,10 +36,15 @@ test("projection deduplicates IDs using endpoint precedence", () => {
           context_window_tokens: 200_000,
           max_output_tokens: 20_000,
           pricing: { input: "0.000001", output: "0.000002", input_cache_read: "0.0000001" },
+          metadata: backing("vercel-ent", "Vercel"),
         },
-        { id: "chat-only", supported_endpoints: ["/v1/chat/completions"] },
-        { id: "messages-only", supported_endpoints: ["/v1/messages"] },
-        { id: "embedding", supported_endpoints: ["/v1/embeddings"] },
+        {
+          id: "chat-only",
+          supported_endpoints: ["/v1/chat/completions"],
+          metadata: backing("vercel-ent", "Vercel"),
+        },
+        { id: "messages-only", supported_endpoints: ["/v1/messages"], metadata: backing("anthropic", "Anthropic") },
+        { id: "embedding", supported_endpoints: ["/v1/embeddings"], metadata: backing("other") },
       ],
     }),
     [builtin],
@@ -45,12 +52,16 @@ test("projection deduplicates IDs using endpoint precedence", () => {
 
   assert.equal(projected.sourceCount, 4);
   assert.equal(projected.supportedCount, 3);
-  assert.deepEqual(projected.byProvider.get("aperture-responses")?.map((model) => model.id), ["gpt-test"]);
-  assert.deepEqual(projected.byProvider.get("aperture-completions")?.map((model) => model.id), ["chat-only"]);
-  assert.deepEqual(projected.byProvider.get("aperture-anthropic")?.map((model) => model.id), ["messages-only"]);
+  assert.deepEqual([...projected.providers.keys()], ["vercel-ent", "anthropic"]);
+  assert.deepEqual(projected.providers.get("vercel-ent")?.models.map((model) => [model.id, model.api]), [
+    ["chat-only", "openai-completions"],
+    ["gpt-test", "openai-responses"],
+  ]);
+  assert.deepEqual(projected.providers.get("anthropic")?.models.map((model) => [model.id, model.api]), [
+    ["messages-only", "anthropic-messages"],
+  ]);
 
-  const model = projected.byProvider.get("aperture-responses")![0];
-  assert.equal(model.api, "openai-responses");
+  const model = projected.providers.get("vercel-ent")!.models.find((entry) => entry.id === "gpt-test")!;
   assert.equal(model.name, "Gateway GPT Test");
   assert.equal(model.reasoning, true);
   assert.deepEqual(model.input, ["text", "image"]);
@@ -60,18 +71,31 @@ test("projection deduplicates IDs using endpoint precedence", () => {
   assert.deepEqual(model.compat, builtin.compat);
 });
 
-test("all configured route providers have distinct endpoint and API mappings", () => {
-  assert.equal(new Set(ROUTES.map((route) => route.provider)).size, ROUTES.length);
-  assert.equal(new Set(ROUTES.map((route) => route.endpoint)).size, ROUTES.length);
-  assert.equal(new Set(ROUTES.map((route) => route.api)).size, ROUTES.length);
+test("duplicate model IDs are preserved across backing routes", () => {
+  const projected = projectCatalog(
+    parseCatalog({
+      data: [
+        { id: "same", supported_endpoints: ["/v1/responses"], metadata: backing("vercel-ent") },
+        { id: "same", supported_endpoints: ["/v1/chat/completions"], metadata: backing("openrouter") },
+      ],
+    }),
+    [],
+  );
+  assert.equal(projected.supportedCount, 2);
+  assert.equal(projected.providers.get("vercel-ent")?.models[0]?.id, "same");
+  assert.equal(projected.providers.get("openrouter")?.models[0]?.id, "same");
 });
 
-test("optional Aperture fixture projects expected aliases", { skip: !process.env.APERTURE_FIXTURE }, async () => {
+test("protocol precedence is unique", () => {
+  assert.equal(new Set(PROTOCOLS.map((route) => route.endpoint)).size, PROTOCOLS.length);
+  assert.equal(new Set(PROTOCOLS.map((route) => route.api)).size, PROTOCOLS.length);
+});
+
+test("optional Aperture fixture projects expected backing routes", { skip: !process.env.APERTURE_FIXTURE }, async () => {
   const raw = JSON.parse(await readFile(process.env.APERTURE_FIXTURE!, "utf8"));
   const projected = projectCatalog(parseCatalog(raw), []);
-  const responses = new Set(projected.byProvider.get("aperture-responses")?.map((model) => model.id));
-  assert(responses.has("zai/glm-5.2"));
-  assert(responses.has("google/gemini-3.7-flash"));
-  assert(responses.has("openai/gpt-5.6-sol"));
-  assert(responses.has("gpt-5.6-sol"));
+  assert(projected.providers.get("vercel-ent")?.models.some((model) => model.id === "zai/glm-5.2"));
+  assert(projected.providers.get("vercel-ent")?.models.some((model) => model.id === "google/gemini-3.7-flash"));
+  assert(projected.providers.get("vercel-ent")?.models.some((model) => model.id === "openai/gpt-5.6-sol"));
+  assert(projected.providers.get("openai-api")?.models.some((model) => model.id === "gpt-5.6-sol"));
 });
