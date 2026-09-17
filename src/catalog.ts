@@ -44,6 +44,10 @@ export interface ProjectedCatalog {
   providers: Map<string, ProjectedProvider>;
   sourceCount: number;
   supportedCount: number;
+  /** Catalog entries that are evaluation (System One) models, not chat models.
+   *  They are excluded from chat-protocol projection; pi cannot call them
+   *  through a chat wire API. See the pi-jev extension for their client. */
+  evaluationModels: ApertureCatalogModel[];
 }
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -105,6 +109,18 @@ function inferImageInput(entry: ApertureCatalogModel): boolean {
   return /(vision|image|gemini|gpt-4o|gpt-5|claude|pixtral|vl(?:[\/_-]|$))/i.test(entry.id);
 }
 
+// Evaluation models (e.g. TypeSafe's Jev) answer typed questions against a
+// state; they have no chat wire API. Aperture lists them with chat endpoints
+// in supported_endpoints, but routing a chat request to one fails with
+// ModelTypeMismatchError, so they must never be projected as chat models.
+// Prefer an explicit upstream marker when the catalog grows one; the id set
+// is the fallback until then.
+function isEvaluationModel(entry: ApertureCatalogModel): boolean {
+  const marker = (entry.metadata as Record<string, unknown> | undefined)?.["model_type"];
+  if (typeof marker === "string") return marker === "evaluation";
+  return entry.id === "typesafe-ai/jev";
+}
+
 function projectModel(
   entry: ApertureCatalogModel,
   protocol: Protocol,
@@ -153,8 +169,13 @@ export function parseCatalog(value: unknown): ApertureCatalogPayload {
 export function projectCatalog(payload: ApertureCatalogPayload, builtins: readonly Model<Api>[]): ProjectedCatalog {
   const providers = new Map<string, ProjectedProvider>();
   const assigned = new Set<string>();
+  const evaluationModels: ApertureCatalogModel[] = [];
 
   for (const entry of payload.data) {
+    if (isEvaluationModel(entry)) {
+      evaluationModels.push(entry);
+      continue;
+    }
     const backing = entry.metadata?.provider;
     if (!backing?.id) continue;
     const protocol = PROTOCOLS.find((candidate) => entry.supported_endpoints?.includes(candidate.endpoint));
@@ -178,7 +199,7 @@ export function projectCatalog(payload: ApertureCatalogPayload, builtins: readon
   }
 
   for (const provider of providers.values()) provider.models.sort((a, b) => a.id.localeCompare(b.id));
-  return { providers, sourceCount: payload.data.length, supportedCount: assigned.size };
+  return { providers, sourceCount: payload.data.length, supportedCount: assigned.size, evaluationModels };
 }
 
 export async function fetchCatalog(signal?: AbortSignal): Promise<ApertureCatalogPayload> {

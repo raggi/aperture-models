@@ -71,6 +71,27 @@ test("projection groups by backing route and selects protocol per model", () => 
   assert.deepEqual(model.compat, builtin.compat);
 });
 
+test("evaluation models are excluded from chat providers", () => {
+  const projected = projectCatalog(
+    parseCatalog({
+      data: [
+        {
+          id: "typesafe-ai/jev",
+          display_name: "Jev",
+          supported_endpoints: ["/v1/messages", "/v1/responses", "/v1/chat/completions"],
+          context_window_tokens: 128_000,
+          metadata: backing("typesafe-ai", "TypeSafe AI"),
+        },
+      ],
+    }),
+    [builtin],
+  );
+
+  assert.equal(projected.providers.size, 0);
+  assert.equal(projected.supportedCount, 0);
+  assert.deepEqual(projected.evaluationModels.map((entry) => entry.id), ["typesafe-ai/jev"]);
+});
+
 test("duplicate model IDs are preserved across backing routes", () => {
   const projected = projectCatalog(
     parseCatalog({
