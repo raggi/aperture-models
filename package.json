@@ -15,10 +15,10 @@
     "validate": "npm run check && npm test"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.4"
+    "@earendil-works/pi-ai": "0.87.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.87.1",
     "@types/node": "^22.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0"
