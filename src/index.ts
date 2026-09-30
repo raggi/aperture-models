@@ -13,6 +13,7 @@ import * as anthropicMessages from "@earendil-works/pi-ai/api/anthropic-messages
 import * as openAICompletions from "@earendil-works/pi-ai/api/openai-completions";
 import * as openAIResponses from "@earendil-works/pi-ai/api/openai-responses";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
+import { isModelType } from "@earendil-works/pi-ai/utils/model-operations";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   APERTURE_ORIGIN,
@@ -108,7 +109,11 @@ export function createApertureProvider(
     getModels: () => models,
     async refreshModels(context: RefreshModelsContext) {
       if (context.stored) {
-        const providerModels = context.stored.models.filter((model) => model.provider === backing.id);
+        // pi 0.99 stores can hold image/classifier entries too; restore only
+        // chat models into this chat-protocol provider.
+        const providerModels = context.stored.models.filter(
+          (model): model is Model<Api> => model.provider === backing.id && isModelType(model, "chat"),
+        );
         const restored = providerModels.filter((model) => model.baseUrl?.startsWith(APERTURE_ORIGIN));
         // Built-in providers can have used the same store key before this
         // extension overrode them. Restore only catalogs wholly owned by
@@ -131,7 +136,11 @@ export function createApertureProvider(
 }
 
 export default async function apertureModels(pi: ExtensionAPI): Promise<void> {
-  const builtins = getBuiltinProviders().flatMap((provider) => getBuiltinModels(provider));
+  // pi 0.99 model lists mix chat, image, and classifier entries; only chat
+  // models can provide wire-protocol matches for Aperture routes.
+  const builtins = getBuiltinProviders()
+    .flatMap((provider) => getBuiltinModels(provider))
+    .filter((model) => isModelType(model, "chat"));
   let current: ProjectedCatalog;
   let latestFetch: { startedAt: number; promise: Promise<ProjectedCatalog> } | undefined;
 
