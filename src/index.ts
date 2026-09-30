@@ -4,6 +4,9 @@ import { dirname, join } from "node:path";
 import type {
   Api,
   AuthContext,
+  ClassifierFunction,
+  ClassifierModel,
+  ClassifierApi,
   Model,
   Provider,
   ProviderStreams,
@@ -15,6 +18,13 @@ import * as openAIResponses from "@earendil-works/pi-ai/api/openai-responses";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { isModelType } from "@earendil-works/pi-ai/utils/model-operations";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  APERTURE_EVALUATION_API,
+  createApertureClassifier,
+  JEV_MODEL_ID,
+  JEV_PROVIDER_ID,
+} from "./classifier.js";
+import { reconcileApertureStore } from "./store-reconcile.js";
 import {
   APERTURE_ORIGIN,
   fetchCatalog,
@@ -64,6 +74,21 @@ function routeModels(provider: string, models: ProviderModelConfig[]): Model<Api
   return models.map((model) => ({ ...model, provider }));
 }
 
+/** The Jev classifier rides Aperture's direct evaluation route (spec v4). */
+function jevClassifierModel(): ClassifierModel<ClassifierApi> {
+  return {
+    id: JEV_MODEL_ID,
+    name: "Jev",
+    type: "classifier",
+    api: APERTURE_EVALUATION_API,
+    input: ["text"],
+    baseUrl: APERTURE_ORIGIN,
+    provider: JEV_PROVIDER_ID,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+  };
+}
+
 async function resolveAuth(ctx: AuthContext) {
   const apiKey = (await ctx.env("APERTURE_API_KEY"))?.trim();
   return {
@@ -78,6 +103,7 @@ async function resolveAuth(ctx: AuthContext) {
 export function createApertureProvider(
   backing: ProjectedProvider,
   refresh: (signal: AbortSignal) => Promise<ProviderModelConfig[]>,
+  options: { classifier?: ClassifierFunction } = {},
 ): Provider {
   let models = routeModels(backing.id, backing.models);
   const streams: Partial<Record<Api, ProviderStreams>> = {
@@ -107,6 +133,12 @@ export function createApertureProvider(
       },
     },
     getModels: () => models,
+    getAllModels: options.classifier
+      ? () => [...models, jevClassifierModel()]
+      : undefined,
+    classify: options.classifier
+      ? (model, context, classifyOptions) => options.classifier!(model, context, classifyOptions)
+      : undefined,
     async refreshModels(context: RefreshModelsContext) {
       if (context.stored) {
         // pi 0.99 stores can hold image/classifier entries too; restore only
@@ -177,4 +209,43 @@ export default async function apertureModels(pi: ExtensionAPI): Promise<void> {
       }),
     );
   }
+
+  // Jev has no chat wire API; register it as a classifier provider so codemode
+  // scripts can call `models.classify()` with the session's ambient credentials.
+  // `stream`/`streamSimple` throw per the Provider contract: this provider has
+  // no chat models, so a chat request to it is always a programming error.
+  const jevProvider: Provider = {
+    id: JEV_PROVIDER_ID,
+    name: "TypeSafe AI (Aperture direct)",
+    baseUrl: APERTURE_ORIGIN,
+    auth: {
+      apiKey: {
+        name: "Tailscale identity",
+        async check() {
+          return { type: "api_key", source: "Tailscale identity" };
+        },
+        async resolve({ ctx }) {
+          return resolveAuth(ctx);
+        },
+      },
+    },
+    getModels: () => [],
+    getAllModels: () => [jevClassifierModel()],
+    stream: () => {
+      throw new Error("typesafe-ai is a classifier-only provider; Jev has no chat wire API");
+    },
+    streamSimple: () => {
+      throw new Error("typesafe-ai is a classifier-only provider; Jev has no chat wire API");
+    },
+    classify: createApertureClassifier(),
+  };
+  pi.registerProvider(jevProvider);
+
+  // Keep the persisted model store tidy when Aperture's route set changes:
+  // entries for backing routes the catalog no longer projects are stale caches.
+  void reconcileApertureStore(new Set(current.providers.keys())).then(
+    ({ removed }) => {
+      if (removed.length) console.error(`[aperture-models] pruned stale model store entries: ${removed.join(", ")}`);
+    },
+  );
 }
