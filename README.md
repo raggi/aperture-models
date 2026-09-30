@@ -18,6 +18,16 @@ of duplicating its model list in `~/.pi/agent/models.json`.
   available, while the route-specific catalog limits and prices remain authoritative.
 - Refreshes all backing providers from one coalesced catalog request when Pi
   refreshes model catalogs.
+- Registers the TypeSafe Jev evaluation model (`typesafe-ai/jev`) as a
+  classifier provider, reachable from codemode via `models.classify()`.
+- Registers the `jev_ask` judgment tool for chat models (same name, parameters,
+  and result shape as the retired pi-jev extension), sharing one wire
+  implementation with the classifier.
+- Prunes stale entries from `~/.pi/agent/models-store.json` at startup: cached
+  catalogs for backing routes the catalog no longer projects (Aperture renames
+  or retires routes over time). Only Aperture-lineage entries are removed; a
+  rolling `models-store.json.aperture-backup` is kept before the first
+  mutation.
 
 Backing IDs are preserved exactly. IDs such as `anthropic` and `openrouter`
 therefore intentionally override Pi's built-in providers while this extension

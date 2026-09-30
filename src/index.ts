@@ -24,6 +24,7 @@ import {
   JEV_MODEL_ID,
   JEV_PROVIDER_ID,
 } from "./classifier.js";
+import { createJevAskTool } from "./jev-tool.js";
 import { reconcileApertureStore } from "./store-reconcile.js";
 import {
   APERTURE_ORIGIN,
@@ -240,6 +241,11 @@ export default async function apertureModels(pi: ExtensionAPI): Promise<void> {
     classify: createApertureClassifier(),
   };
   pi.registerProvider(jevProvider);
+
+  // The jev_ask judgment tool for chat models (codemode scripts use
+  // models.classify() on the classifier provider above). Ambient key from the
+  // environment mirrors the provider auth resolution.
+  pi.registerTool(createJevAskTool({ apiKey: process.env.APERTURE_API_KEY?.trim() || undefined }));
 
   // Keep the persisted model store tidy when Aperture's route set changes:
   // entries for backing routes the catalog no longer projects are stale caches.
