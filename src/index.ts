@@ -12,11 +12,14 @@ import type {
   ProviderStreams,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import * as anthropicMessages from "@earendil-works/pi-ai/api/anthropic-messages";
-import * as openAICompletions from "@earendil-works/pi-ai/api/openai-completions";
-import * as openAIResponses from "@earendil-works/pi-ai/api/openai-responses";
+// pi-ai subpath imports are only safe where the host resolves them natively:
+// extension loaders that run extensions through jiti's alias map (SDK/runner
+// child sessions) prefix-replace the package specifier, so unaliased subpaths
+// like /api/* or /utils/* mangle into broken module paths there. The root and
+// the /compat and /providers/all subpaths are aliased (or natively resolvable)
+// in every host context, and the compat entry re-exports the API adapters.
+import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi, isModelType } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
-import { isModelType } from "@earendil-works/pi-ai/utils/model-operations";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   APERTURE_EVALUATION_API,
@@ -108,9 +111,9 @@ export function createApertureProvider(
 ): Provider {
   let models = routeModels(backing.id, backing.models);
   const streams: Partial<Record<Api, ProviderStreams>> = {
-    "openai-responses": openAIResponses,
-    "openai-completions": openAICompletions,
-    "anthropic-messages": anthropicMessages,
+    "openai-responses": openAIResponsesApi(),
+    "openai-completions": openAICompletionsApi(),
+    "anthropic-messages": anthropicMessagesApi(),
   };
   const streamFor = (api: Api): ProviderStreams => {
     const implementation = streams[api];

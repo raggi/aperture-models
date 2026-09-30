@@ -34,6 +34,16 @@ therefore intentionally override Pi's built-in providers while this extension
 is enabled: they mean those backing routes through Aperture, not direct public
 API access.
 
+## pi-ai import surfaces
+
+Import `@earendil-works/pi-ai` only from the root (types plus runtime
+re-exports), `/compat` (API adapters), and `/providers/all` (builtin
+catalogs). Never import other pi-ai subpaths (`/api/*`, `/utils/*`):
+extension loaders that run extensions through jiti's alias map — SDK and
+runner-hosted child sessions — prefix-replace the package specifier, so
+unaliased subpaths mangle into broken module paths and the extension fails
+to load exactly where background subagents need it.
+
 Aperture normally uses Tailscale identity and needs no API key. In that mode the
 extension sends the non-secret marker `Authorization: Tailscale` to satisfy the
 client SDKs' auth guards; Aperture authenticates the connection by Tailscale
