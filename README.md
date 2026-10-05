@@ -52,6 +52,12 @@ identity and ignores the marker value. If a deployment requires a key, set
 
 ## Develop and verify
 
+The development SDK is pinned to Pi **1.0.4**. Background child loading is
+live-verified with **pi-subagents 0.76.0**. On Pi 1.0.x, use pi-subagents
+**0.75.0 or newer**: 0.74.0 requires the removed `pi-agent-core/node` export
+and fails before loading this provider. Keep the alias-safe imports above;
+that earlier provider-loader fix is still required independently.
+
 ```sh
 npm install
 npm run validate
